@@ -1,5 +1,6 @@
 import os
 import sys
+import random
 from datetime import datetime
 from bs4 import BeautifulSoup
 import time
@@ -17,6 +18,10 @@ from type.community_crawler import CommunityRequest, CommunityResponse
 MAX_PAGE_ACCESS = 2 # 한 페이지에 크롤링을 시도하는 최대 횟수
 WAIT_TIME = 1 # 페이지 로드를 기다리는 시간
 
+MAX_RETRIES = 5         
+BACKOFF_BASE = 1.0        
+BACKOFF_CAP = 30.0     
+RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 class DCInsideCrawler:
     def __init__(self):
@@ -27,8 +32,28 @@ class DCInsideCrawler:
     def load_links_from_csv(self, filename):
         df = pd.read_csv(filename)
         return df['link'].tolist()
+    
+    def request_with_backoff(self,param, url):
+        attempt = 0
+        while attempt < MAX_RETRIES:
+            try :
+                res = requests.get(url, params=param, headers= self.headers)
+                if res.status_code < 400 or res.status_code not in RETRY_STATUS_CODES:
+                    return res
+            except requests.RequestException as exc:
+                res = None 
+            
+            if attempt == MAX_RETRIES:
+                return res 
+            sleep = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))
+            # jitter도 적용
+            delay = random.uniform(BACKOFF_BASE *(2 ** attempt-1), sleep) 
+            print(f"[retry] attempt={attempt+1} sleeping {delay:.2f}s before retry …")
+            time.sleep(delay)
+            attempt += 1
+        return None
 
-    def get_urls():
+    def get_urls(self):
         urls = []
         for i in range(12228, 12785+1):
             url = "https://gall.dcinside.com/board/lists/?id=car_new1&page=" + str(i)
@@ -44,11 +69,7 @@ class DCInsideCrawler:
             else:
                 i += 1
             
-            # 요청 시 User-Agent 헤더 넣기(권장)
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-            }
-            response = requests.get(url, headers=headers)
+            response = self.request_with_backoff(url)
             print(f"[ Fetching page ] : {url}")
             
             if response.status_code == 200:
@@ -118,7 +139,7 @@ class DCInsideCrawler:
 
                 url = links[id]
 
-                response = requests.get(url, headers=self.headers)
+                response = self.request_with_backoff(url)
                 print("[ Fetching page ID ]  : {page}".format(page = url))
 
                 if response.status_code == 200:
