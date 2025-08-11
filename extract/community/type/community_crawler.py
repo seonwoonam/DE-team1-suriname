@@ -19,3 +19,14 @@ class CommunityResponse(TypedDict):
     like_count : int
     source : str
     link : str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "post_time": self.post_time,
+            "title": self.title,
+            "content": self.content,
+            "view_count": self.view_count,
+            "like_count": self.like_count,
+            "source": self.source,
+            "link": self.link,
+        }
