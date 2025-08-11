@@ -12,6 +12,13 @@ import pyarrow.parquet as pq
 import boto3
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_random_exponential,
+    retry_if_exception_type,
+    retry_if_result,
+)
 
 from type.community_crawler import CommunityRequest, CommunityResponse
 
@@ -33,25 +40,17 @@ class DCInsideCrawler:
         df = pd.read_csv(filename)
         return df['link'].tolist()
     
-    def request_with_backoff(self,param, url):
-        attempt = 0
-        while attempt < MAX_RETRIES:
-            try :
-                res = requests.get(url, params=param, headers= self.headers)
-                if res.status_code < 400 or res.status_code not in RETRY_STATUS_CODES:
-                    return res
-            except requests.RequestException as exc:
-                res = None 
-            
-            if attempt == MAX_RETRIES:
-                return res 
-            sleep = min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt))
-            # jitter도 적용
-            delay = random.uniform(BACKOFF_BASE *(2 ** attempt-1), sleep) 
-            print(f"[retry] attempt={attempt+1} sleeping {delay:.2f}s before retry …")
-            time.sleep(delay)
-            attempt += 1
-        return None
+    @retry(
+        stop=stop_after_attempt(MAX_RETRIES),
+        wait=wait_random_exponential_jitter(multiplier=BACKOFF_BASE, max=BACKOFF_CAP, jitter=0.5),
+        retry=(
+            retry_if_exception_type(requests.RequestException)
+            | retry_if_result(lambda r: r is not None and r.status_code in RETRY_STATUS_CODES)
+        ),
+        reraise=False,
+    )
+    def request_with_retry(self, url, params=None):
+        return requests.get(url, params=params, headers=self.headers)
 
     def get_urls(self):
         urls = []
@@ -69,7 +68,7 @@ class DCInsideCrawler:
             else:
                 i += 1
             
-            response = self.request_with_backoff(url)
+            response = self.request_with_retry(url)
             print(f"[ Fetching page ] : {url}")
             
             if response.status_code == 200:
@@ -139,7 +138,7 @@ class DCInsideCrawler:
 
                 url = links[id]
 
-                response = self.request_with_backoff(url)
+                response = self.request_with_retry(url)
                 print("[ Fetching page ID ]  : {page}".format(page = url))
 
                 if response.status_code == 200:
