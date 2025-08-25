@@ -1,5 +1,10 @@
 import asyncio
 import logging
+import sys
+import os
+
+# Add the project root to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable, List, Optional, Sequence, Tuple, Dict, Any
@@ -126,6 +131,7 @@ class AsyncDCInsideCrawler:
         
         ##############
         # as_complete로 바꿔줘야 할듯.
+        # gather vs as_complete 
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         collected: List[str] = []

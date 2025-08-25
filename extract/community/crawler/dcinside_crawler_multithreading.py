@@ -1,5 +1,9 @@
 import os
 import sys
+
+# Add the project root to the Python path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
+
 import random
 from datetime import datetime
 from bs4 import BeautifulSoup
@@ -20,7 +24,7 @@ from tenacity import (
     retry_if_result,
 )
 
-from type.community_crawler import CommunityRequest, CommunityResponse
+from extract.community.type.community_crawler import CommunityRequest, CommunityResponse
 
 MAX_PAGE_ACCESS = 2 # 한 페이지에 크롤링을 시도하는 최대 횟수
 WAIT_TIME = 1 # 페이지 로드를 기다리는 시간
@@ -42,7 +46,7 @@ class DCInsideCrawler:
     
     @retry(
         stop=stop_after_attempt(MAX_RETRIES),
-        wait=wait_random_exponential_jitter(multiplier=BACKOFF_BASE, max=BACKOFF_CAP, jitter=0.5),
+        wait=wait_random_exponential(multiplier=BACKOFF_BASE, max=BACKOFF_CAP),
         retry=(
             retry_if_exception_type(requests.RequestException)
             | retry_if_result(lambda r: r is not None and r.status_code in RETRY_STATUS_CODES)
@@ -54,7 +58,7 @@ class DCInsideCrawler:
 
     def get_urls(self):
         urls = []
-        for i in range(12228, 12785+1):
+        for i in range(12228, 12328+1):
             url = "https://gall.dcinside.com/board/lists/?id=car_new1&page=" + str(i)
             urls.append(url)
 
@@ -217,7 +221,7 @@ class DCInsideCrawler:
         df.to_parquet(filename, engine='pyarrow')  
 
 
-    def start_crawling_multithreaded(self, start_id, end_id, max_workers=2):
+    def start_crawling_multithreaded(self, start_id, end_id, max_workers=5):
         data = []
 
         total_ids = end_id - start_id + 1
@@ -255,9 +259,17 @@ class DCInsideCrawler:
             )
                
 
-crawler = DCInsideCrawler()
-# crawler.start_crawling(9521786, 9559471)
+if __name__ == "__main__":
+    start_time = time.time()
 
-links = crawler.load_links_from_csv('links.csv')
-crawler.start_crawling_multithreaded(4001, 7000)
-# crawler.start_crawling_multithreaded(0, 21211)
+    crawler = DCInsideCrawler()
+    # crawler.get_urls()
+    # crawler.start_crawling(9521786, 9559471)
+
+    # links = []
+    links = crawler.load_links_from_csv('links.csv')
+    crawler.start_crawling_multithreaded(0, 1000)
+    # crawler.start_crawling_multithreaded(0, 21211)
+
+    end_time = time.time()
+    print(f"Total execution time: {end_time - start_time:.2f} seconds")

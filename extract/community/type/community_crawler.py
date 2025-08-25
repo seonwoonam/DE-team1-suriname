@@ -1,5 +1,6 @@
-from typing import TypedDict, List
+from typing import Any, TypedDict, List, Dict
 from datetime import datetime
+from dataclasses import dataclass, asdict
 
 # 커뮤니티 댓글 타입 (키 : 내용)
 class CommunityComment(TypedDict):
@@ -11,7 +12,8 @@ class CommunityRequest(TypedDict):
     end_time : datetime
 
 # 출력 데이터의 타입 (키: 게시날짜, 제목, 본문, 댓글, 조회수, 좋아요, 출처, 링크)
-class CommunityResponse(TypedDict):
+@dataclass
+class CommunityResponse:
     post_time : datetime
     title : str
     content : str
@@ -21,12 +23,4 @@ class CommunityResponse(TypedDict):
     link : str
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
-            "post_time": self.post_time,
-            "title": self.title,
-            "content": self.content,
-            "view_count": self.view_count,
-            "like_count": self.like_count,
-            "source": self.source,
-            "link": self.link,
-        }
+        return asdict(self)
