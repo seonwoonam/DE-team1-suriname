@@ -356,4 +356,5 @@ conf.py
 **/*.csv
 **/*.parquet
 
+GEMINI.md
 # End of https://www.toptal.com/developers/gitignore/api/python,visualstudiocode,pycharm,macos,jupyternotebooks

@@ -1,0 +1,50 @@
+
+
+{
+  "data_asset_type": "Dataset",
+  "expectation_suite_name": "news_raw_data_suite",
+  "expectations": [
+    {
+      "expectation_type": "expect_table_columns_to_match_ordered_list",
+      "kwargs": {
+        "column_list": ["post_time", "title", "content", "source", "link", "keyword"]
+      },
+      "meta": {
+        "failure_level": "Critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_not_be_null",
+      "kwargs": {
+        "column": "link"
+      },
+      "meta": {
+        "failure_level": "Critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_match_strftime_format",
+      "kwargs": {
+        "column": "post_time",
+        "strftime_format": "%Y-%m-%d %H:%M:%S"
+      },
+      "meta": {
+        "failure_level": "Non-critical"
+      }
+    },
+    {
+      "expectation_type": "expect_column_values_to_match_regex",
+      "kwargs": {
+        "column": "link",
+        "regex": "^https?://[\\w\\-./?=&%]+$"
+      },
+      "meta": {
+        "failure_level": "Non-critical"
+      }
+    }
+  ],
+  "meta": {
+    "great_expectations_version": "0.18.12"
+  }
+}
+
