@@ -41,6 +41,15 @@
       "meta": {
         "failure_level": "Non-critical"
       }
+    },
+    {
+      "expectation_type":"expect_column_values_to_be_unique",
+      "kwargs" : {
+        "column":"link"
+      },
+      "meta": {
+        "failure_level": "Critical"
+      }
     }
   ],
   "meta": {
