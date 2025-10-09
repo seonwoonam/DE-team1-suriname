@@ -5,13 +5,15 @@ from pyspark.sql.functions import col, when, lit
 from great_expectations.core.batch import RuntimeBatchRequest
 from great_expectations.data_context import BaseDataContext
 from great_expectations.data_context.types.base import DataContextConfig, S3StoreBackendDefaults
-
-# sns 모듈 경로 추가 (실제 환경에 맞게 조정 필요)
-# sys.path.append('/path/to/project/') 
 from sns.slack_alert import send_message
 
 def get_gx_context(bucket_name):
-    """Great Expectations Data Context를 설정하고 반환합니다."""
+    """
+    Great Expectations Data Context를 설정하고 반환
+        store_backends : gx의 운영에 필요한 요소들 혹은 산출물들을 어디에 저장할지
+        data_docs_sites : 결과 docs 파일을 어디에 저장할지
+        datasources : 어떤 엔진을 활용할지
+    """
     data_context_config = DataContextConfig(
         store_backends={
             "expectations_store": {"class_name": "ExpectationsStore"},
@@ -30,10 +32,23 @@ def get_gx_context(bucket_name):
                 "site_index_builder": {"class_name": "DefaultSiteIndexBuilder"},
             }
         },
+        datasources={
+            "spark_s3_raw_news": {
+                "class_name": "Datasource",
+                "execution_engine": {"class_name": "SparkDFExecutionEngine"},
+                "data_connectors": {
+                    "runtime_data_connector": {
+                        "class_name": "RuntimeDataConnector",
+                        "batch_identifiers": ["default_identifier_name"]
+                    }
+                }
+            }
+        },
     )
     return BaseDataContext(project_config=data_context_config)
 
 def build_critical_payload(data_asset_name, failed_expectation, data_docs_path):
+    """Slack - 크리티컬"""
     return {
         "text": f":rotating_light: [CRITICAL] Data Quality Check Failed for `{data_asset_name}`",
         "attachments": [{
@@ -47,6 +62,7 @@ def build_critical_payload(data_asset_name, failed_expectation, data_docs_path):
     }
 
 def build_warning_payload(data_asset_name, quarantined_count, passed_count, failed_expectations, quarantine_path, data_docs_path):
+    """Slack - 경고"""
     failed_rules = "\n".join([f"- `{exp['expectation_config']['expectation_type']}` on column `{exp['expectation_config']['kwargs']['column']}`" for exp in failed_expectations])
     return {
         "text": f":warning: [WARNING] Data Quality Issues Found in `{data_asset_name}`",
@@ -64,7 +80,7 @@ def build_warning_payload(data_asset_name, quarantined_count, passed_count, fail
     }
 
 def quarantine_failed_rows(df, failed_expectations):
-    """Non-critical 검증에 실패한 행들을 격리합니다."""
+    """Non-critical 검증에 실패한 행들을 격리"""
     
     # 각 행에 대해 실패한 규칙을 기록할 컬럼 추가
     df_with_errors = df.withColumn("__gx_error_rules__", lit(""))
@@ -77,11 +93,8 @@ def quarantine_failed_rows(df, failed_expectations):
         condition = None
         if expectation_type == "expect_column_values_to_match_regex":
             regex = kwargs["regex"]
-            # 정규식을 만족하지 못하는 경우를 실패로 간주
             condition = ~col(column).rlike(regex)
         elif expectation_type == "expect_column_values_to_match_strftime_format":
-            # PySpark에서 strftime을 직접 지원하지 않으므로, 정규식으로 형식 검사
-            # 예: "%Y-%m-%d %H:%M:%S" -> "^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$"
             format_regex = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
             condition = ~col(column).cast("string").rlike(format_regex)
         
@@ -106,9 +119,10 @@ def main(args):
     # 현재는 로컬 경로만 가정. context.get_expectation_suite는 로컬 파일시스템을 사용.
     expectation_suite = context.get_expectation_suite(expectation_suite_name=args.suite_name)
     
+    # 검증할 데이터가 뭔지 GX에게 알려주는 과정
     validator = context.get_validator(
         batch_request=RuntimeBatchRequest(
-            datasource_name="spark_s3_datasource",
+            datasource_name="spark_s3_raw_news",
             data_connector_name="runtime_data_connector",
             data_asset_name=args.data_asset_name,
             runtime_parameters={"batch_data": df},
@@ -138,7 +152,7 @@ def main(args):
                     non_critical_failures.append(result)
 
         # Data Docs 경로 생성 (S3 Public URL 형식으로 가정)
-        # 실제로는 S3에 생성된 객체의 URL을 얻어오는 더 나은 방법이 필요할 수 있음
+        # S3에 생성된 객체의 URL을 얻어오는 더 나은 방법이 필요할 수 있음
         data_docs_path = f"https://{args.s3_bucket_name}.s3.amazonaws.com/gx/data_docs/index.html"
 
         if critical_failure:
