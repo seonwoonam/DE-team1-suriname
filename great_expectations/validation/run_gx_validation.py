@@ -80,31 +80,51 @@ def build_warning_payload(data_asset_name, quarantined_count, passed_count, fail
     }
 
 def quarantine_failed_rows(df, failed_expectations):
-    """Non-critical 검증에 실패한 행들을 격리"""
-    
+    """Non-critical 검증에 실패한 행들을 격리
+
+    뉴스 스위트 기준 지원 항목:
+    - expect_column_values_to_match_regex (link URL 정규식)
+    - expect_column_values_to_match_strftime_format (post_time: "%Y-%m-%d %H:%M:%S")
+    - expect_column_values_to_not_be_null (Non-critical로 사용되는 경우에만 격리)
+
+    테이블 레벨(expect_table_columns_to_match_ordered_list)은 행 단위 격리가 불가능하므로 제외합니다.
+    """
+
     # 각 행에 대해 실패한 규칙을 기록할 컬럼 추가
     df_with_errors = df.withColumn("__gx_error_rules__", lit(""))
 
     for result in failed_expectations:
         expectation_type = result["expectation_config"]["expectation_type"]
-        kwargs = result["expectation_config"]["kwargs"]
-        column = kwargs["column"]
-        
+        kwargs = result["expectation_config"].get("kwargs", {})
+
+        # 테이블 레벨 기대치는 행 단위 격리 불가 → 스킵
+        if expectation_type == "expect_table_columns_to_match_ordered_list":
+            continue
+
+        # 어떤 컬럼인지 확인
+        column = kwargs.get("column")
+        if not column:
+            # 컬럼이 명시되지 않은 기대치는 행 단위로 처리하지 않음
+            continue
+
         condition = None
         if expectation_type == "expect_column_values_to_match_regex":
-            regex = kwargs["regex"]
-            condition = ~col(column).rlike(regex)
+            regex = kwargs.get("regex", ".*")
+            condition = ~col(column).cast("string").rlike(regex)
         elif expectation_type == "expect_column_values_to_match_strftime_format":
             format_regex = "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$"
             condition = ~col(column).cast("string").rlike(format_regex)
-        
+        elif expectation_type == "expect_column_values_to_not_be_null":
+            condition = col(column).isNull()
+
         if condition is not None:
-            df_with_errors = df_with_errors.withColumn("__gx_error_rules__", 
-                when(condition, col("__gx_error_rules__") + f"{expectation_type};", col("__gx_error_rules__"))
+            df_with_errors = df_with_errors.withColumn(
+                "__gx_error_rules__",
+                when(condition, col("__gx_error_rules__") + f"{expectation_type};").otherwise(col("__gx_error_rules__"))
             )
 
     bad_df = df_with_errors.filter(col("__gx_error_rules__") != "").coalesce(1)
-    
+
     # 원본 DataFrame에서 오류가 있었던 행들을 제외하여 good_df 생성 (left_anti join 사용)
     good_df = df.join(bad_df.select(df.columns), on=df.columns, how="left_anti")
 
