@@ -123,7 +123,10 @@ for source in news_sources:
     extract_lambda_tasks.append(lambda_task)
 
 
+
 s3_news_data = Variable.get("S3_NEWS_DATA", "s3a://aws-seoul-suriname/data/news/")
+s3_news_passed_data = Variable.get("S3_NEWS_PASSED_DATA", "s3a://aws-seoul-suriname/data/news_passed/")
+s3_news_quarantine_data = Variable.get("S3_NEWS_QUARANTINE_DATA", "s3a://aws-seoul-suriname/quarantine/news/")
 s3_news_output = Variable.get("S3_NEWS_OUTPUT", "s3a://aws-seoul-suriname/data/news/output/")
 accident_keyword_original = Variable.get("ACCIDENT_KEYWORD")
 encoded_value = base64.b64encode(json.dumps(accident_keyword_original, ensure_ascii=False).encode('utf-8')).decode('utf-8')
@@ -131,24 +134,56 @@ Variable.set("ACCIDENT_KEYWORD_ENCODED", encoded_value)
 accident_keyword = Variable.get("ACCIDENT_KEYWORD_ENCODED")
 gpt = Variable.get("GPT")
 
-entryPointArguments = [
-    "--data_source", s3_news_data,
+# =================================================================================================
+# ================== 1. 데이터 품질 검증(Great Expectations) EMR Serverless 실행 Task ==================
+# =================================================================================================
+validate_entryPointArguments = [
+    "--s3-bucket-name", Variable.get("S3_BUCKET_NAME", "aws-seoul-suriname"),
+    "--raw-data-path", f"{s3_news_data}{test_batch_period}/", # 원본 데이터 경로
+    "--passed-data-path", f"{s3_news_passed_data}{test_batch_period}/", # 통과 데이터 저장 경로
+    "--quarantine-path", f"{s3_news_quarantine_data}{test_batch_period}/", # 격리 데이터 저장 경로
+    "--expectation-suite-path", Variable.get("GX_SUITE_PATH", "/etc/spark/resources/great_expectations/expectations/news_raw_data_suite.json"), # EMR에 배포된 경로
+    "--suite-name", "news_raw_data_suite",
+    "--data-asset-name", "NewsRawData",
+    "--slack-webhook-url", Variable.get("DEV_WEBHOOK_URL")
+]
+
+validate_news_data_quality = EmrServerlessStartJobOperator(
+    task_id='validate_news_data_quality',
+    application_id=Variable.get("EMR_APPLICATION_ID"),
+    execution_role_arn="arn:aws:iam::572660899671:role/service-role/AmazonEMR-ExecutionRole-1739724269830",
+    job_driver={
+        "sparkSubmit": {
+            "entryPoint": Variable.get("GX_VALIDATION_ENTRY_POINT"), # S3에 저장된 run_gx_validation.py
+            "entryPointArguments": validate_entryPointArguments,
+            "sparkSubmitParameters": "--conf spark.archives=/path/to/your/gx_project_archive.zip#great_expectations" # GX 프로젝트 압축 파일
+        }
+    },
+    configuration_overrides={},
+    aws_conn_id=None,
+    dag=dag
+)
+
+
+# =================================================================================================
+# ================== 2. 데이터 변환(Transform) EMR Serverless 실행 Task =============================
+# =================================================================================================
+transform_entryPointArguments = [
+    "--data_source", f"{s3_news_passed_data}{test_batch_period}/", # 검증을 통과한 데이터를 입력으로 사용
     "--output_uri", s3_news_output,
-    # "--batch_period", "{{ (data_interval_start + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}_{{ (data_interval_end + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}",
-    "--batch_period", test_batch_period, # test
+    "--batch_period", test_batch_period,
     "--accident_keyword", accident_keyword,
     "--gpt", gpt
 ]
 
-# **EMR Serverless 실행 Task**
 emr_serverless_task = EmrServerlessStartJobOperator(
     task_id='run_news_emr_transform',
-    application_id=Variable.get("EMR_APPLICATION_ID"),  # MWAA Variable에서 가져옴
-    execution_role_arn="arn:aws:iam::572660899671:role/service-role/AmazonEMR-ExecutionRole-1739724269830",  # EMR 실행 역할
+    application_id=Variable.get("EMR_APPLICATION_ID"),
+    execution_role_arn="arn:aws:iam::572660899671:role/service-role/AmazonEMR-ExecutionRole-1739724269830",
     job_driver={
         "sparkSubmit": {
-            "entryPoint": Variable.get("NEWS_ENTRY_POINT"),  # S3에 저장된 Spark 실행 코드
-            "entryPointArguments": entryPointArguments,
+            "entryPoint": Variable.get("NEWS_ENTRY_POINT"),
+            "entryPointArguments": transform_entryPointArguments,
             "sparkSubmitParameters": "--conf spark.executor.memory=4g --conf spark.driver.memory=2g"
         }
     },
@@ -157,20 +192,21 @@ emr_serverless_task = EmrServerlessStartJobOperator(
     dag=dag
 )
 
-# **RDS 병합 및 업데이트 Lambda 실행 Task 추가**
+# =================================================================================================
+# ================== 3. 데이터 적재(Load) Lambda 실행 Task ========================================
+# =================================================================================================
 lambda_load_news_task = LambdaInvokeFunctionOperator(
     task_id='invoke_lambda_load_news',
     function_name='lambda_load_news',
     payload=json.dumps({
-        "batch_period": test_batch_period,  # 테스트용
-        # "batch_period": "{{ (data_interval_start + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}_{{ (data_interval_end + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}",
-        "threshold": Variable.get("THRESHOLD", 10),  # 뉴스 이슈 기준 값
+        "batch_period": test_batch_period,
+        "threshold": Variable.get("THRESHOLD", 10),
         "dbname": Variable.get("RDS_DBNAME"),
         "user": Variable.get("RDS_USER"),
         "password": Variable.get("RDS_PASSWORD"),
         "url": Variable.get("RDS_HOST"),
         "port": Variable.get("RDS_PORT"),
-        "bucket_name": Variable.get("S3_BUCKET_NAME")  # S3 버킷 정보
+        "bucket_name": Variable.get("S3_BUCKET_NAME")
     }),
     aws_conn_id=None,
     region_name='ap-northeast-2',
@@ -178,7 +214,9 @@ lambda_load_news_task = LambdaInvokeFunctionOperator(
     dag=dag
 )
 
-# is_issue가 True인 데이터가 있는지 확인하는 BranchPythonOperator
+# =================================================================================================
+# ================== 4. 후속 DAG 트리거 로직 ======================================================
+# =================================================================================================
 check_issue_task = BranchPythonOperator(
     task_id='check_rds_issue',
     python_callable=check_rds_issue,
@@ -186,7 +224,6 @@ check_issue_task = BranchPythonOperator(
     dag=dag
 )
 
-# community_dag 트리거 Task (조건부 실행)
 trigger_community_dag = TriggerDagRunOperator(
     task_id='trigger_community_dag',
     trigger_dag_id='community_dag',
@@ -201,6 +238,9 @@ skip_community_dag = DummyOperator(
     dag=dag
 )
 
-# Lambda 실행 이후 EMR Serverless 실행
-extract_lambda_tasks >> emr_serverless_task >> lambda_load_news_task >> check_issue_task >> [trigger_community_dag, skip_community_dag]
+# =================================================================================================
+# ================== 최종 Task 의존성 설정 ========================================================
+# =================================================================================================
+extract_lambda_tasks >> validate_news_data_quality >> emr_serverless_task >> lambda_load_news_task >> check_issue_task >> [trigger_community_dag, skip_community_dag]
+
 

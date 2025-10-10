@@ -9,18 +9,44 @@ from sns.slack_alert import send_message
 
 def get_gx_context(bucket_name):
     """
-    Great Expectations Data Context를 설정하고 반환
-        store_backends : gx의 운영에 필요한 요소들 혹은 산출물들을 어디에 저장할지
-        data_docs_sites : 결과 docs 파일을 어디에 저장할지
-        datasources : 어떤 엔진을 활용할지
+        Great Expectations Data Context를 표준 stores 구성으로 설정하고 반환합니다.
+            stores : 스토어 자체를 정의
+            data_docs_sites : 결과 docs 파일을 어디에 저장할지
+            datasources : 어떤 엔진을 활용할지
     """
     data_context_config = DataContextConfig(
-        store_backends={
-            "expectations_store": {"class_name": "ExpectationsStore"},
-            "validations_store": {"class_name": "ValidationsStore", "store_backend": {"class_name": "TupleS3StoreBackend", "bucket": bucket_name, "prefix": "gx/validations"}},
-            "evaluation_parameter_store": {"class_name": "EvaluationParameterStore"},
-            "checkpoint_store": {"class_name": "CheckpointStore", "store_backend": {"class_name": "TupleS3StoreBackend", "bucket": bucket_name, "prefix": "gx/checkpoints"}},
+        stores={
+            "expectations_store": {
+                "class_name": "ExpectationsStore",
+                "store_backend": {
+                    "class_name": "TupleFilesystemStoreBackend",
+                    "base_directory": "great_expectations/expectations",
+                },
+            },
+            "validations_store": {
+                "class_name": "ValidationsStore",
+                "store_backend": {
+                    "class_name": "TupleS3StoreBackend",
+                    "bucket": bucket_name,
+                    "prefix": "gx/validations",
+                },
+            },
+            "evaluation_parameter_store": {
+                "class_name": "EvaluationParameterStore"
+            },
+            "checkpoint_store": {
+                "class_name": "CheckpointStore",
+                "store_backend": {
+                    "class_name": "TupleS3StoreBackend",
+                    "bucket": bucket_name,
+                    "prefix": "gx/checkpoints",
+                },
+            },
         },
+        expectations_store_name="expectations_store",
+        validations_store_name="validations_store",
+        evaluation_parameter_store_name="evaluation_parameter_store",
+        checkpoint_store_name="checkpoint_store",
         data_docs_sites={
             "s3_site": {
                 "class_name": "SiteBuilder",
@@ -39,9 +65,9 @@ def get_gx_context(bucket_name):
                 "data_connectors": {
                     "runtime_data_connector": {
                         "class_name": "RuntimeDataConnector",
-                        "batch_identifiers": ["default_identifier_name"]
+                        "batch_identifiers": ["default_identifier_name"],
                     }
-                }
+                },
             }
         },
     )
