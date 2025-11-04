@@ -1,16 +1,30 @@
 from airflow import DAG
-from airflow.providers.amazon.aws.hooks.lambda_function import LambdaHook
 from airflow.providers.amazon.aws.operators.lambda_function import LambdaInvokeFunctionOperator as BaseLambdaInvokeFunctionOperator
+from airflow.providers.amazon.aws.hooks.lambda_function import LambdaHook
 from airflow.providers.amazon.aws.operators.emr import EmrServerlessStartJobOperator
 # from airflow.models.baseoperator import chain
 from airflow.operators.python import PythonOperator
 from airflow.models import Variable
+from conf import (
+    EMR_EXECUTION_ROLE_ARN,
+    EMR_APPLICATION_ID,
+    GX_PROJECT_ARCHIVE,
+    S3_BUCKET_NAME,
+    S3_COMMUNITY_DATA,
+    S3_COMMUNITY_PASSED_DATA,
+    S3_COMMUNITY_QUARANTINE_DATA,
+    S3_COMMUNITY_OUTPUT,
+    GX_VALIDATION_ENTRY_POINT,
+    GX_COMMUNITY_SUITE_PATH,
+    COMMUNITY_ENTRY_POINT,
+    DEV_WEBHOOK_URL,
+    USER_WEBHOOK_URL,
+)
 from datetime import datetime, timedelta
 import json
 import ast
 import hashlib
 from botocore.config import Config
-import json
 import base64
 
 test_start_time = Variable.get("TEST_START_TIME")
@@ -24,7 +38,7 @@ def send_slack_alert_callback(context):
     log_url = context.get("task_instance").log_url
 
     slack_data = {
-        "webhook_url" : Variable.get("DEV_WEBHOOK_URL"),
+        "webhook_url" : DEV_WEBHOOK_URL,
         "payload" : {
             "dag_id": dag_id,
             "task_id" : task_id,
@@ -159,40 +173,70 @@ for community in communities:
     )
     extract_lambda_tasks.append(lambda_task)
 
-s3_community_data = Variable.get("S3_COMMUNITY_DATA", "s3a://aws-seoul-suriname/data/community/")
-s3_community_output = Variable.get("S3_COMMUNITY_OUTPUT", "s3a://aws-seoul-suriname/data/community/output/")
+s3_community_data = S3_COMMUNITY_DATA
+s3_community_passed_data = S3_COMMUNITY_PASSED_DATA
+s3_community_quarantine_data = S3_COMMUNITY_QUARANTINE_DATA
+s3_community_output = S3_COMMUNITY_OUTPUT
 community_accident_keyword_original = Variable.get("COMMUNITY_ACCIDENT_KEYWORD")
 encoded_value = base64.b64encode(json.dumps(community_accident_keyword_original, ensure_ascii=False).encode('utf-8')).decode('utf-8')
 Variable.set("COMMUNITY_ACCIDENT_KEYWORD_ENCODED", encoded_value)
 accident_keyword = Variable.get("COMMUNITY_ACCIDENT_KEYWORD_ENCODED")
-
 gpt = Variable.get("GPT")
 issue_list_original = Variable.get("issue_list")
-# issue_list_original = Variable.get("test_issue_list") # test
 issue_list_encoded_value = base64.b64encode(json.dumps(issue_list_original, ensure_ascii=False).encode('utf-8')).decode('utf-8')
 Variable.set("ISSUE_LIST_ENCODED", issue_list_encoded_value)
 issue_list = Variable.get("ISSUE_LIST_ENCODED")
 
+# =================================================================================================
+# ================== 1. 데이터 품질 검증(Great Expectations) EMR Serverless 실행 Task ==================
+# =================================================================================================
+validate_entryPointArguments = [
+    "--s3-bucket-name", S3_BUCKET_NAME,
+    "--raw-data-path", f"{s3_community_data}{test_batch_period}/",
+    "--passed-data-path", f"{s3_community_passed_data}{test_batch_period}/",
+    "--quarantine-path", f"{s3_community_quarantine_data}{test_batch_period}/",
+    "--expectation-suite-path", GX_COMMUNITY_SUITE_PATH,
+    "--suite-name", "community_raw_data_suite",
+    "--data-asset-name", "CommunityRawData",
+    "--slack-webhook-url", DEV_WEBHOOK_URL
+]
 
-entryPointArguments = [
-    "--data_source", s3_community_data,
+validate_community_data_quality = EmrServerlessStartJobOperator(
+    task_id='validate_community_data_quality',
+    application_id=EMR_APPLICATION_ID,
+    execution_role_arn=EMR_EXECUTION_ROLE_ARN,
+    job_driver={
+        "sparkSubmit": {
+            "entryPoint": GX_VALIDATION_ENTRY_POINT,
+            "entryPointArguments": validate_entryPointArguments,
+            "sparkSubmitParameters": f"--conf spark.archives={GX_PROJECT_ARCHIVE}"
+        }
+    },
+    configuration_overrides={},
+    aws_conn_id=None,
+    dag=dag
+)
+
+# =================================================================================================
+# ================== 2. 데이터 변환(Transform) EMR Serverless 실행 Task =============================
+# =================================================================================================
+transform_entryPointArguments = [
+    "--data_source", f"{s3_community_passed_data}{test_batch_period}/", # 검증 통과 데이터를 입력으로 사용
     "--output_uri", s3_community_output,
-    # "--batch_period", "{{ (data_interval_start + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}_{{ (data_interval_end + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}",
-    "--batch_period", test_batch_period, # test
+    "--batch_period", test_batch_period,
     "--community_accident_keyword", accident_keyword,
     "--gpt", gpt,
     "--issue_list", issue_list
 ]
 
-# **EMR Serverless 실행 Task**
 emr_serverless_task = EmrServerlessStartJobOperator(
     task_id='run_community_emr_transform',
-    application_id=Variable.get("EMR_APPLICATION_ID"),  # MWAA Variable에서 가져옴
-    execution_role_arn="arn:aws:iam::572660899671:role/service-role/AmazonEMR-ExecutionRole-1739724269830",  # EMR 실행 역할
+    application_id=EMR_APPLICATION_ID,
+    execution_role_arn=EMR_EXECUTION_ROLE_ARN,
     job_driver={
         "sparkSubmit": {
-            "entryPoint": Variable.get("COMMUNITY_ENTRY_POINT"),  # S3에 저장된 Spark 실행 코드
-            "entryPointArguments": entryPointArguments,
+            "entryPoint": COMMUNITY_ENTRY_POINT,
+            "entryPointArguments": transform_entryPointArguments,
             "sparkSubmitParameters": "--conf spark.executor.memory=4g --conf spark.driver.memory=2g"
         }
     },
@@ -201,19 +245,20 @@ emr_serverless_task = EmrServerlessStartJobOperator(
     dag=dag
 )
 
-# **RDS 병합 및 업데이트 + 이슈주의도 calculate + view table append Lambda 실행 Task 추가**
+# =================================================================================================
+# ================== 3. 데이터 적재(Load) Lambda 실행 Task ========================================
+# =================================================================================================
 lambda_load_community_task = LambdaInvokeFunctionOperator(
     task_id='invoke_lambda_load_community',
     function_name='lambda_rds_update_news',
     payload=json.dumps({
-        "batch_period": test_batch_period,  # 테스트용
-        # "batch_period": "{{ (data_interval_start + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}_{{ (data_interval_end + macros.timedelta(hours=9)).strftime('%Y-%m-%d-%H-%M-00') }}",
+        "batch_period": test_batch_period,
         "dbname": Variable.get("RDS_DBNAME"),
         "user": Variable.get("RDS_USER"),
         "password": Variable.get("RDS_PASSWORD"),
         "url": Variable.get("RDS_HOST"),
         "port": Variable.get("RDS_PORT"),
-        "bucket_name": Variable.get("S3_BUCKET_NAME"),  # S3 버킷 정보
+        "bucket_name": S3_BUCKET_NAME,
         "redshift_db": Variable.get("REDSHIFT_DB"),
         "redshift_workgroup": Variable.get("REDSHIFT_WORKGROUP")
     }),
@@ -223,7 +268,9 @@ lambda_load_community_task = LambdaInvokeFunctionOperator(
     dag=dag
 )
 
-# Slack Alert Task
+# =================================================================================================
+# ================== 4. 최종 결과 Slack 알림 Task =================================================
+# =================================================================================================
 send_slack_alert = LambdaInvokeFunctionOperator(
     task_id='send_slack_alert',
     function_name='lambda_slack_alert',
@@ -233,7 +280,7 @@ send_slack_alert = LambdaInvokeFunctionOperator(
         "password": Variable.get("RDS_PASSWORD"),
         "url": Variable.get("RDS_HOST"),
         "port": Variable.get("RDS_PORT"),
-        "webhook_url": Variable.get("USER_WEBHOOK_URL")
+        "webhook_url": USER_WEBHOOK_URL
     }),
     aws_conn_id=None,
     region_name='ap-northeast-2',
@@ -241,21 +288,7 @@ send_slack_alert = LambdaInvokeFunctionOperator(
     dag=dag
 )
 
-
-
-
-# DAG 실행 순서 설정
-# chain(
-#     process_issue_task,
-#     extract_lambda_tasks,
-#     emr_serverless_task,
-#     lambda_load_community_task,
-#     send_slack_alert
-# )
-
-# process_issue_task >> extract_lambda_tasks >> emr_serverless_task >> lambda_load_community_task >> send_slack_alert
-
-process_issue_task >> emr_serverless_task >> lambda_load_community_task >> send_slack_alert
-
-# test
-# emr_serverless_task >> lambda_load_community_task
+# =================================================================================================
+# ================== 최종 Task 의존성 설정 ========================================================
+# =================================================================================================
+process_issue_task >> extract_lambda_tasks >> validate_community_data_quality >> emr_serverless_task >> lambda_load_community_task >> send_slack_alert
